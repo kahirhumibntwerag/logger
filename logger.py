@@ -1,5 +1,4 @@
-# train_autoencoder_single.py
-# One-file script: dataset + logger + simple autoencoder + training example
+
 
 import io
 import os
@@ -15,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+from dotenv import load_dotenv
 
 # Optional: Weights & Biases logging
 try:
@@ -22,6 +22,9 @@ try:
     WANDB_AVAILABLE = True
 except Exception:
     WANDB_AVAILABLE = False
+
+# Load environment variables from a local .env file if present
+load_dotenv()
 
 # -----------------------
 # Constants and utilities
@@ -425,12 +428,21 @@ class ConvAutoencoder(nn.Module):
 # Training example (can be toggled)
 # -----------------------
 def main():
-    # 1) Device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # 1) Device (can be overridden via env)
+    device_env = os.getenv("DEVICE")
+    device = device_env if device_env else ("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 2) Data
-    images_path = "/content/drive/MyDrive/wind_data/images.npy"
-    headers_path = "/content/drive/MyDrive/wind_data/headers.npy"
+    # 2) Data (configurable via env)
+    images_path = os.getenv("DATA_IMAGES_PATH", "/content/drive/MyDrive/wind_data/images.npy")
+    headers_path = os.getenv("DATA_HEADERS_PATH", "/content/drive/MyDrive/wind_data/headers.npy")
+
+    # Training hyperparameters
+    batch_size = int(os.getenv("BATCH_SIZE", "8"))
+    lr = float(os.getenv("LR", "1e-3"))
+    epochs = int(os.getenv("EPOCHS", "3"))
+    num_workers = int(os.getenv("NUM_WORKERS", "2"))
+    pin_memory_env = os.getenv("PIN_MEMORY")
+    pin_memory = (pin_memory_env.strip().lower() in ("1","true","yes","y","on")) if pin_memory_env is not None else (device == "cuda")
 
     dataset = SolarWindDataset(
         images_path=images_path,
@@ -439,29 +451,31 @@ def main():
     )
     loader = DataLoader(
         dataset,
-        batch_size=8,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=2,
-        pin_memory=(device == "cuda"),
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         collate_fn=collate_keep_headers,
     )
 
     # 3) Model/optim on device
     model = ConvAutoencoder(in_ch=1).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     # 4) Logger
+    wandb_enabled = os.getenv("WANDB_ENABLED", "true").strip().lower() in ("1","true","yes","y","on")
+    wandb_project = os.getenv("WANDB_PROJECT", "solar-ae-demo")
+    wandb_run_name = os.getenv("WANDB_RUN_NAME", f"simple-ae-{device}")
     wb = WandBLogger(
-        enabled=True,  # set False to disable logging
-        project="solar-ae-demo",
-        config={"batch_size": 8, "lr": 1e-3, "device": device},
-        run_name=f"simple-ae-{device}",
+        enabled=wandb_enabled,  # set False to disable logging
+        project=wandb_project,
+        config={"batch_size": batch_size, "lr": lr, "device": device},
+        run_name=wandb_run_name,
     )
     wb.maybe_watch(model)
 
     # 5) Train (minimal example)
     global_step = 0
-    epochs = 3
     model.train()
     for epoch in range(1, epochs + 1):
         for batch_idx, (x, hdrs) in enumerate(loader):

@@ -3,3 +3,4 @@ fsspec
 s3fs
 sunpy[all]
 gdown
+python-dotenv
