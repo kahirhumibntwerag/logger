@@ -15,6 +15,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from dotenv import load_dotenv
+import argparse
+from getpass import getpass
 
 # Optional: Weights & Biases logging
 try:
@@ -25,6 +27,28 @@ except Exception:
 
 # Load environment variables from a local .env file if present
 load_dotenv()
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Train simple solar autoencoder")
+    parser.add_argument("--device", type=str, default="auto", help="cuda, cpu, or auto")
+    parser.add_argument("--images-path", type=str, default="/content/drive/MyDrive/wind_data/images.npy")
+    parser.add_argument("--headers-path", type=str, default="/content/drive/MyDrive/wind_data/headers.npy")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--num-workers", type=int, default=2)
+    # Pin memory flags (default decided later based on device)
+    parser.add_argument("--pin-memory", dest="pin_memory", action="store_true")
+    parser.add_argument("--no-pin-memory", dest="pin_memory", action="store_false")
+    parser.set_defaults(pin_memory=None)
+
+    # WandB controls (only API key comes from env / prompt)
+    parser.add_argument("--wandb", dest="wandb_enabled", action="store_true")
+    parser.add_argument("--no-wandb", dest="wandb_enabled", action="store_false")
+    parser.set_defaults(wandb_enabled=True)
+    parser.add_argument("--wandb-project", type=str, default="solar-ae-demo")
+    parser.add_argument("--wandb-run-name", type=str, default=None)
+    return parser.parse_args()
+
 
 # -----------------------
 # Constants and utilities
@@ -428,21 +452,20 @@ class ConvAutoencoder(nn.Module):
 # Training example (can be toggled)
 # -----------------------
 def main():
-    # 1) Device (can be overridden via env)
-    device_env = os.getenv("DEVICE")
-    device = device_env if device_env else ("cuda" if torch.cuda.is_available() else "cpu")
+    args = _parse_args()
 
-    # 2) Data (configurable via env)
-    images_path = os.getenv("DATA_IMAGES_PATH", "/content/drive/MyDrive/wind_data/images.npy")
-    headers_path = os.getenv("DATA_HEADERS_PATH", "/content/drive/MyDrive/wind_data/headers.npy")
+    # 1) Device
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
 
-    # Training hyperparameters
-    batch_size = int(os.getenv("BATCH_SIZE", "8"))
-    lr = float(os.getenv("LR", "1e-3"))
-    epochs = int(os.getenv("EPOCHS", "3"))
-    num_workers = int(os.getenv("NUM_WORKERS", "2"))
-    pin_memory_env = os.getenv("PIN_MEMORY")
-    pin_memory = (pin_memory_env.strip().lower() in ("1","true","yes","y","on")) if pin_memory_env is not None else (device == "cuda")
+    # Decide pin_memory default if not explicitly set
+    pin_memory = (args.pin_memory if args.pin_memory is not None else (device == "cuda"))
+
+    # 2) Data (from CLI)
+    images_path = args.images_path
+    headers_path = args.headers_path
 
     dataset = SolarWindDataset(
         images_path=images_path,
@@ -451,31 +474,51 @@ def main():
     )
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         shuffle=True,
-        num_workers=num_workers,
+        num_workers=args.num_workers,
         pin_memory=pin_memory,
         collate_fn=collate_keep_headers,
     )
 
     # 3) Model/optim on device
     model = ConvAutoencoder(in_ch=1).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # 4) Logger
-    wandb_enabled = os.getenv("WANDB_ENABLED", "true").strip().lower() in ("1","true","yes","y","on")
-    wandb_project = os.getenv("WANDB_PROJECT", "solar-ae-demo")
-    wandb_run_name = os.getenv("WANDB_RUN_NAME", f"simple-ae-{device}")
+    wandb_enabled = bool(args.wandb_enabled and WANDB_AVAILABLE)
+
+    # Handle WANDB login via API key from env or prompt
+    if wandb_enabled:
+        api_key = os.getenv("WANDB_API_KEY")
+        if not api_key:
+            try:
+                api_key = getpass("Enter WANDB_API_KEY (hidden): ").strip()
+            except Exception:
+                api_key = None
+        if api_key:
+            try:
+                wandb.login(key=api_key, relogin=True)
+            except Exception as e:
+                print(f"[wandb] login failed, disabling wandb: {e}")
+                wandb_enabled = False
+        else:
+            print("[wandb] No API key provided. Disabling wandb logging.")
+            wandb_enabled = False
+
+    wandb_project = args.wandb_project
+    wandb_run_name = args.wandb_run_name or f"simple-ae-{device}"
     wb = WandBLogger(
         enabled=wandb_enabled,  # set False to disable logging
         project=wandb_project,
-        config={"batch_size": batch_size, "lr": lr, "device": device},
+        config={"batch_size": args.batch_size, "lr": args.lr, "device": device},
         run_name=wandb_run_name,
     )
     wb.maybe_watch(model)
 
     # 5) Train (minimal example)
     global_step = 0
+    epochs = args.epochs
     model.train()
     for epoch in range(1, epochs + 1):
         for batch_idx, (x, hdrs) in enumerate(loader):
